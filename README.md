@@ -1,0 +1,1 @@
+This project demonstrates the integration of Visual Odometry (VO) with GPS/RTK data, using the KITTI dataset. The goal is to improve positioning accuracy by introducing artificial noise to GPS and refining trajectories with an Unscented Kalman Filter (UKF).

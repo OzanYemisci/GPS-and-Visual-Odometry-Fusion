@@ -1,4 +1,4 @@
-#Camera-GPS Sensor Fusion
+# Camera-GPS Sensor Fusion
 This project demonstrates the integration of Visual Odometry (VO) with GPS/RTK data, using the KITTI dataset. The goal is to improve positioning accuracy by introducing artificial noise to GPS and refining trajectories with an Unscented Kalman Filter (UKF).
 
 ![Image](https://github.com/user-attachments/assets/072038c8-7907-4e32-a9cc-d467699a169a)

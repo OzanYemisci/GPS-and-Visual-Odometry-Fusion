@@ -14,10 +14,10 @@ EE492 Project/
 
 
 ## How to Run
--Download the KITTI dataset (drive 2011_09_26_drive_0022_sync).
--Place the dataset folders (image_02, oxts, and calib_cam_to_cam.txt) in the correct paths.
--Run the Main.m script in MATLAB.
--Output figures will show:
-  -Camera trajectory vs ground truth
-  -Noisy GPS vs smoothed vs filtered trajectory
-  -Error plots and improvement percentage
+- Download the KITTI dataset (drive 2011_09_26_drive_0022_sync).
+- Place the dataset folders (image_02, oxts, and calib_cam_to_cam.txt) in the correct paths.
+- Run the Main.m script in MATLAB.
+- Output figures will show:
+  - Camera trajectory vs ground truth
+  - Noisy GPS vs smoothed vs filtered trajectory
+  - Error plots and improvement percentage

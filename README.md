@@ -1,16 +1,20 @@
 #Camera-GPS Sensor Fusion
 This project demonstrates the integration of Visual Odometry (VO) with GPS/RTK data, using the KITTI dataset. The goal is to improve positioning accuracy by introducing artificial noise to GPS and refining trajectories with an Unscented Kalman Filter (UKF).
 
+![Image](https://github.com/user-attachments/assets/072038c8-7907-4e32-a9cc-d467699a169a)
+
+![Image](https://github.com/user-attachments/assets/bc3f7991-4ffc-40f5-bed6-f597e56f599f)
+
 ## Folder Structure
-EE492 Project/
-│
-├── devkit/                  # KITTI devkit for loading GPS and pose
-├── 2011_09_26_drive_0022/   # KITTI data (images, oxts, calib)
-├── kalmanFilterRT.m         # Kalman smoothing of GPS
-├── kalmanFiltering.m        # UKF for fusing VO + GPS
-├── addGpsRtkNoiseInterval.m # Adds Gaussian noise to GPS intervals
-├── Main.m                   # Main script that runs the full pipeline
-└── helper*.m                # Helper functions for VO and 3D pose estimation
+- EE492 Project/
+- │
+- ├── devkit/                  # KITTI devkit for loading GPS and pose
+- ├── 2011_09_26_drive_0022/   # KITTI data (images, oxts, calib)
+- ├── kalmanFilterRT.m         # Kalman smoothing of GPS
+- ├── kalmanFiltering.m        # UKF for fusing VO + GPS
+- ├── addGpsRtkNoiseInterval.m # Adds Gaussian noise to GPS intervals
+- ├── Main.m                   # Main script that runs the full pipeline
+- └── helper*.m                # Helper functions for VO and 3D pose estimation
 
 
 ## How to Run

@@ -1,0 +1,341 @@
+clc; clear all;
+addpath('devkit/matlab/');
+oxts = loadOxtsliteData('2011_09_26_drive_0022_sync');
+pose = convertOxtsToPose(oxts);
+rng(0);
+selectedClasses = ["car", "person", "bicycle", "motorcycle", "bus", "truck"];
+yoloxModel = yoloxObjectDetector("tiny-coco", selectedClasses);
+
+%% 1. Veri Hazırlığı
+% GPS ve poz verilerini yükle
+xyz = zeros(length(pose), 3);
+for viewId = 1:length(pose)
+    if ~isempty(pose{viewId})
+        xyz(viewId, :) = pose{viewId}(1:3, 4)'; 
+    end
+end
+noisy_xyz = addGpsRtkNoiseInterval(xyz,3,1);
+xyz_smoothed = kalmanFilterRT(noisy_xyz);
+% Kamera parametreleri
+calibration = loadCalibrationCamToCam('calib_cam_to_cam.txt');
+P_matrix = calibration.P_rect{1};
+focalLength = [P_matrix(1,1) P_matrix(2,2)];
+principalPoint = [P_matrix(1,3) P_matrix(2,3)];
+images = imageDatastore('2011_09_26_drive_0022_sync/image_02/data');
+Irgb = readimage(images, 1); 
+imageSize = size(Irgb,[1,2]);
+intrinsics = cameraIntrinsics(focalLength, principalPoint, imageSize);
+
+%% 2. Global Feature Veritabanı Oluşturma
+% Bag yapısı: her bir öğe sadece feature ve pozisyon içeriyor
+bag = struct('Feature', {}, 'Points', {}, 'Position', {});
+
+for i = 1:numel(images.Files)
+    I = undistortImage(im2gray(readimage(images, i)), intrinsics);
+    points = detectSURFFeatures(I, 'MetricThreshold', 500);
+    [features, ~] = extractFeatures(I, points, 'Upright', true);
+    bag(i).Feature = features;
+    bag(i).Points = points;
+    bag(i).Positions = xyz(i,:);
+end
+
+
+
+%% 4. Ana İşlem Döngüsü
+% İlk görüntüyü işleme
+prevI = undistortImage(im2gray(Irgb), intrinsics); 
+
+% Detect features. 
+prevPoints = detectSURFFeatures(prevI, MetricThreshold=500);
+
+% Select a subset of features, uniformly distributed throughout the image.
+numPoints = 200;
+prevPoints = selectUniform(prevPoints, numPoints, size(prevI));
+
+% Extract features. Using 'Upright' features improves matching quality if 
+% the camera motion involves little or no in-plane rotation.
+prevFeatures = extractFeatures(prevI, prevPoints, Upright=true);
+
+vSet = imageviewset;
+
+% Add the first view. Place the camera associated with the first view
+% at the origin, oriented along the Z-axis.
+viewId = 1;
+vSet = addView(vSet, viewId, rigidtform3d(eye(3), [0 0 0]), Points=prevPoints);
+
+% Convert to gray scale and undistort.
+viewId = 2;
+Irgb = readimage(images, viewId);
+I = undistortImage(im2gray(Irgb), intrinsics);
+
+% Match features between the previous and the current image.
+[currPoints, currFeatures, indexPairs] = helperDetectAndMatchFeatures(...
+    prevFeatures, Irgb, yoloxModel);
+
+% Estimate the pose of the current view relative to the previous view.
+[relPose, inlierIdx] = helperEstimateRelativePose(...
+    prevPoints(indexPairs(:,1)), currPoints(indexPairs(:,2)), intrinsics);
+
+% Exclude epipolar outliers.
+indexPairs = indexPairs(inlierIdx, :);
+
+% Add the current view to the view set.
+vSet = addView(vSet, viewId, relPose, Points=currPoints);
+
+% Store the point matches between the previous and the current views.
+vSet = addConnection(vSet, viewId-1, viewId, Matches=indexPairs);
+prevI = I;
+prevFeatures = currFeatures;
+prevPoints   = currPoints;
+
+% Loop through images
+for viewId = 3:15
+    Irgb = readimage(images, viewId);
+    % Read and undistort the current image
+    I = undistortImage(im2gray(Irgb), intrinsics);
+
+    % Match features between previous and current image
+    [currPoints, currFeatures, indexPairs] = helperDetectAndMatchFeatures(prevFeatures, Irgb, yoloxModel);
+
+    % Estimate the relative pose of the current view
+    [relPose, inlierIdx] = helperEstimateRelativePose(prevPoints(indexPairs(:,1)), currPoints(indexPairs(:,2)), intrinsics);
+    indexPairs = indexPairs(inlierIdx, :);
+    
+    % Triangulate points from the previous two views, and find the 
+    % corresponding points in the current view.
+    [worldPoints, imagePoints] = helperFind3Dto2DCorrespondences(vSet,...
+        intrinsics, indexPairs, currPoints);
+    
+    warningstate = warning('off','vision:ransac:maxTrialsReached');
+    
+    % Estimate the world camera pose for the current view.
+    absPose = estworldpose(imagePoints, worldPoints, intrinsics);
+    
+    % Restore the original warning state
+    warning(warningstate)
+    
+    % Add the current view to the view set.
+    vSet = addView(vSet, viewId, absPose, Points=currPoints);
+    
+    % Store the point matches between the previous and the current views.
+    vSet = addConnection(vSet, viewId-1, viewId, Matches=indexPairs);    
+    
+    tracks = findTracks(vSet); % Find point tracks spanning multiple views.
+        
+    camPoses = poses(vSet);    % Get camera poses for all views.
+    
+    % Triangulate initial locations for the 3-D world points.
+    xyzPoints = triangulateMultiview(tracks, camPoses, intrinsics);
+    
+    % Refine camera poses using bundle adjustment.
+    [~, camPoses] = bundleAdjustment(xyzPoints, tracks, camPoses, ...
+        intrinsics, PointsUndistorted=true, AbsoluteTolerance=1e-7,...
+        RelativeTolerance=1e-15, MaxIterations=20, FixedViewID=1, Solver="preconditioned-conjugate-gradient");
+        
+    vSet = updateView(vSet, camPoses); % Update view set.
+   
+    % Bundle adjustment can move the entire set of cameras. Normalize the
+    % view set to place the first camera at the origin looking along the
+    % Z-axes and adjust the scale to match that of the ground truth.
+    vSet = helperNormalizeViewSet(vSet, xyz);
+    
+    prevI = I;
+    prevFeatures = currFeatures;
+    prevPoints   = currPoints;  
+end
+
+%%
+for viewId = 16:numel(images.Files)
+    % Read and display the next image
+    Irgb = readimage(images, viewId);
+    
+    % Convert to gray scale and undistort.
+    I = undistortImage(im2gray(Irgb), intrinsics);
+
+    % Match points between the previous and the current image.
+    [currPoints, currFeatures, indexPairs] = helperDetectAndMatchFeatures(...
+        prevFeatures, Irgb, yoloxModel);    
+          
+    % Triangulate points from the previous two views, and find the 
+    % corresponding points in the current view.
+    [worldPoints, imagePoints] = helperFind3Dto2DCorrespondences(vSet, ...
+        intrinsics, indexPairs, currPoints);
+
+    % Since RANSAC involves a stochastic process, it may sometimes not
+    % reach the desired confidence level and exceed maximum number of
+    % trials. Disable the warning when that happens since the outcomes are
+    % still valid.
+    warningstate = warning('off','vision:ransac:maxTrialsReached');
+    
+    % Estimate the world camera pose for the current view.
+    absPose = estworldpose(imagePoints, worldPoints, intrinsics);
+    
+    % Restore the original warning state
+    warning(warningstate)
+    
+    % Add the current view and connection to the view set.
+    vSet = addView(vSet, viewId, absPose, Points=currPoints);
+    vSet = addConnection(vSet, viewId-1, viewId, Matches=indexPairs);
+        
+    % Refine estimated camera poses using windowed bundle adjustment. Run 
+    % the optimization every 30th view.
+    time1 = datetime('now');
+    if mod(viewId, 30) == 0  
+        windowSize = 30;
+        camPoses = poses(vSet);
+        
+        vSetLast15 = takeLast15ViewSet(vSet, camPoses, windowSize);
+        minimum = min(viewId-1,31);
+        
+        startFrame = max(1, viewId - windowSize);
+        tracks = findTracks(vSetLast15, MinTrackLength=5);
+        camPoses = poses(vSetLast15);
+        [xyzPoints, reprojErrors] = triangulateMultiview(tracks, camPoses, intrinsics);
+                                
+        fixedIds = [startFrame, startFrame+1];
+        idx = reprojErrors < 1.5;
+        
+        [~, camPoses] = bundleAdjustment(xyzPoints(idx, :), tracks(idx), ...
+            camPoses, intrinsics, FixedViewIDs=fixedIds, ...
+            PointsUndistorted=true, AbsoluteTolerance=1e-12,...
+            RelativeTolerance=1e-12, MaxIterations=200);
+    
+        vSet = updateView(vSet, camPoses);
+        [vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz);
+    
+        % Get bag-matched position
+        %[matched_pos, matched_id] = matchCurrentImageWithBag(bag, Irgb, intrinsics);
+        matched_pos = xyz_smoothed(viewId, : );
+
+        % 1. Mevcut VO pozisyonunu al
+        current_vo_pose = temp_camPoses.AbsolutePose(end);
+        current_vo_pos = current_vo_pose.Translation;
+
+        % Transform to VO coordinate system
+        target_pos  = [-matched_pos(2), matched_pos(3),  matched_pos(1)];
+        
+        translation_vector = target_pos - current_vo_pos;
+
+        soft_translation = translation_vector * 1;
+        start_idx = max(1, height(temp_camPoses)-30); % Son 7 kare (veya daha az varsa)
+        for i = start_idx:height(temp_camPoses)
+            weight = min(1,(i+1 - start_idx)/15);
+            temp_camPoses.AbsolutePose(i).Translation = ...
+                temp_camPoses.AbsolutePose(i).Translation + translation_vector * weight;
+        end
+        % Update view set with the fused pose
+        vSet = updateView(vSet, temp_camPoses);
+    end
+    time2 = datetime('now');
+    timeDifference = between(time1, time2);
+    disp(viewId +" time "+ char(timeDifference));
+
+    
+    prevI = I;
+    prevFeatures = currFeatures;
+    prevPoints   = currPoints;  
+end
+%%
+[vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz);
+
+camPoses = poses(vSet); % Kamera pozlarını al
+positions = vertcat(camPoses.AbsolutePose.Translation);
+positions = positions(:, [3, 1, 2]); % (X, Y, Z) yerine (Z, -Y, X)
+positions(:,2) = -positions(:,2);    % Y eksenini ters çevir
+
+
+figure;
+hold on;
+plot3(positions(:,1), positions(:,2), positions(:,3), '-', 'LineWidth', 2); % Kamera trajesi (mavi)
+plot3(xyz(:,1), xyz(:,2), xyz(:,3), '-', 'LineWidth', 2); % Gerçek pozisyonlar (kırmızı)
+xlabel('X');
+ylabel('Y');
+zlabel('Z');
+grid on;
+legend('Estimated Camera Trajectory', 'Ground Truth');
+title('Camera Trajectory vs Ground Truth');
+hold off;
+
+
+
+%%
+% Kalman Filtresi
+rotations = cell(height(camPoses), 1);
+for viewId = 1:height(camPoses)
+    rotations{viewId} = camPoses.AbsolutePose(viewId).R; % 3x3 rotasyon matrisi
+end
+
+filtered_positions = kalmanFiltering(xyz_smoothed, positions, rotations);
+% Sonuçları Görselleştirme
+figure;
+hold on;
+plot(positions(:,1), positions(:,2), '-', 'LineWidth', 2); % VO Trajesi
+plot(xyz(:,1), xyz(:,2), '-', 'LineWidth', 2); % GPS Trajesi
+plot(filtered_positions(:,1), filtered_positions(:,2), '-', 'LineWidth', 2); % Filtrelenmiş Traje
+plot(xyz_smoothed(:,1), xyz_smoothed(:,2),  '-', 'LineWidth', 2, 'Color', 'b'); % Noisy GPS Trajesi
+xlabel('X');
+ylabel('Y');
+zlabel('Z');
+grid on;
+legend('VO Trajectory', 'GPS Trajectory', 'Filtered Trajectory','smoothed_noisyXYZ');
+title('Unscented Kalman Filtered Trajectory (GPS + VO)');
+hold off;
+
+figure;
+hold on;
+plot(noisy_xyz(:,1), noisy_xyz(:,2),  '.', 'LineWidth', 2, 'Color', 'm'); % Noisy GPS Trajesi
+plot(xyz_smoothed(:,1), xyz_smoothed(:,2),  '.', 'LineWidth', 2, 'Color', 'b'); % Noisy GPS Trajesi
+xlabel('X');
+ylabel('Y');
+zlabel('Z');
+grid on;
+legend('Noisy GPS Trajectory','smoothedNoisyXYZ');
+title('Noisy GPS vs Smoothed GPS');
+hold off;
+% XY düzlemindeki filtrelenmiş pozisyon hatası
+positionErrorXY = vecnorm(filtered_positions(:, 1:2) - xyz(:, 1:2), 2, 2); % Filtrelenmiş ve ground truth
+
+% XY düzlemindeki noisy_xyz pozisyon hatası
+noisyErrorXY = vecnorm(noisy_xyz(:, 1:2) - xyz(:, 1:2), 2, 2); % gps ve ground truth
+
+% XY düzlemindeki noisy_xyz pozisyon hatası
+smoothErrorXY = vecnorm(xyz_smoothed(:, 1:2) - xyz(:, 1:2), 2, 2); % smoothXYgps ve ground truth
+
+% Yüzdelik iyileşmeyi hesapla
+improvementPercentage = ((smoothErrorXY - positionErrorXY) ./ smoothErrorXY) * 100; % Yüzde iyileşme
+improvementPercentage(improvementPercentage < 0) = 0; % Negatif değerleri sıfır yap
+% Grafiklerin çizimi
+figure;
+% noisy_GPS pozisyon hatası
+subplot(3, 1, 1);
+plot(noisyErrorXY, '-', 'LineWidth', 2, 'Color', 'r');
+xlabel('Frame');
+ylabel('Error (meters)');
+title('Noisy gps Trajectory XY Error');
+grid on;
+legend('Noisy gps Position Error');
+
+% smoothed_noisy_gps pozisyon hatası
+subplot(3, 1, 2);
+plot(smoothErrorXY, '-', 'LineWidth', 2, 'Color', 'b');
+xlabel('Frame');
+ylabel('Error (meters)');
+title('Smoothed gps Trajectory XY Error');
+grid on;
+legend('Smoothed gps Position Error');
+
+hold on;
+plot(positionErrorXY, '-', 'LineWidth', 2);
+xlabel('Frame');
+ylabel('Error (meters)');
+title('Kalman Filter XY Error (Estimated vs Ground Truth)');
+grid on;
+legend('Smoothed gps Position Error','Filtered Position Error');
+
+subplot(3, 1, 3);
+plot(improvementPercentage, '-', 'LineWidth', 2);
+xlabel('Frame');
+ylabel('Improvement (%)');
+title('Percentage Improvement (Smoothed GPS vs Filtered)');
+grid on;
+legend('Improvement Percentage');

@@ -6,6 +6,13 @@ rng(0);
 selectedClasses = ["car", "person", "bicycle", "motorcycle", "bus", "truck"];
 yoloxModel = yoloxObjectDetector("tiny-coco", selectedClasses);
 
+gps_timestamps = readTimestamps('2011_09_26_drive_0022_sync/oxts/timestamps.txt');
+image_timestamps = readTimestamps('2011_09_26_drive_0022_sync/image_02/timestamps.txt');
+global_base_time = min([gps_timestamps(1); image_timestamps(1)]);
+% 4. Normalizasyon yap
+[gps_sec, ~] = normalizeTimestamps(gps_timestamps, global_base_time);
+[img_sec, ~] = normalizeTimestamps(image_timestamps, global_base_time);
+
 %% 1. Veri Hazırlığı
 % GPS ve poz verilerini yükle
 xyz = zeros(length(pose), 3);
@@ -14,8 +21,9 @@ for viewId = 1:length(pose)
         xyz(viewId, :) = pose{viewId}(1:3, 4)'; 
     end
 end
-noisy_xyz = addGpsRtkNoiseInterval(xyz,3,1);
-xyz_smoothed = kalmanFilterRT(noisy_xyz);
+noisy_xyz = addGpsRtkNoise(xyz,3,1);
+xyz_smoothed = kalmanFilterRT(noisy_xyz,gps_timestamps);
+
 % Kamera parametreleri
 calibration = loadCalibrationCamToCam('calib_cam_to_cam.txt');
 P_matrix = calibration.P_rect{1};
@@ -26,7 +34,9 @@ Irgb = readimage(images, 1);
 imageSize = size(Irgb,[1,2]);
 intrinsics = cameraIntrinsics(focalLength, principalPoint, imageSize);
 
-%% 2. Global Feature Veritabanı Oluşturma
+%%
+%{
+ 2. Global Feature Veritabanı Oluşturma
 % Bag yapısı: her bir öğe sadece feature ve pozisyon içeriyor
 bag = struct('Feature', {}, 'Points', {}, 'Position', {});
 
@@ -37,9 +47,7 @@ for i = 1:numel(images.Files)
     bag(i).Feature = features;
     bag(i).Points = points;
     bag(i).Positions = xyz(i,:);
-end
-
-
+%}
 
 %% 4. Ana İşlem Döngüsü
 % İlk görüntüyü işleme
@@ -137,7 +145,7 @@ for viewId = 3:15
     % Bundle adjustment can move the entire set of cameras. Normalize the
     % view set to place the first camera at the origin looking along the
     % Z-axes and adjust the scale to match that of the ground truth.
-    vSet = helperNormalizeViewSet(vSet, xyz);
+    vSet = helperNormalizeViewSet(vSet, xyz_smoothed);
     
     prevI = I;
     prevFeatures = currFeatures;
@@ -180,7 +188,7 @@ for viewId = 16:numel(images.Files)
     % Refine estimated camera poses using windowed bundle adjustment. Run 
     % the optimization every 30th view.
     time1 = datetime('now');
-    if mod(viewId, 30) == 0  
+    if mod(viewId, 30) == 0 || viewId == height(noisy_xyz)  
         windowSize = 30;
         camPoses = poses(vSet);
         
@@ -201,7 +209,7 @@ for viewId = 16:numel(images.Files)
             RelativeTolerance=1e-12, MaxIterations=200);
     
         vSet = updateView(vSet, camPoses);
-        [vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz);
+        [vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz_smoothed);
     
         % Get bag-matched position
         %[matched_pos, matched_id] = matchCurrentImageWithBag(bag, Irgb, intrinsics);
@@ -217,9 +225,9 @@ for viewId = 16:numel(images.Files)
         translation_vector = target_pos - current_vo_pos;
 
         soft_translation = translation_vector * 1;
-        start_idx = max(1, height(temp_camPoses)-30); % Son 7 kare (veya daha az varsa)
+        start_idx = max(1, height(temp_camPoses)-30); % Son 30 kare (veya daha az varsa)
         for i = start_idx:height(temp_camPoses)
-            weight = min(1,(i+1 - start_idx)/15);
+            weight = min(1,(i+1 - start_idx)/30);
             temp_camPoses.AbsolutePose(i).Translation = ...
                 temp_camPoses.AbsolutePose(i).Translation + translation_vector * weight;
         end
@@ -236,11 +244,10 @@ for viewId = 16:numel(images.Files)
     prevPoints   = currPoints;  
 end
 %%
-[vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz);
 
 camPoses = poses(vSet); % Kamera pozlarını al
 positions = vertcat(camPoses.AbsolutePose.Translation);
-positions = positions(:, [3, 1, 2]); % (X, Y, Z) yerine (Z, -Y, X)
+positions = positions(:, [3, 1, 2]); % (X, Y, Z) yerine (-Y, Z, X)
 positions(:,2) = -positions(:,2);    % Y eksenini ters çevir
 
 
@@ -265,7 +272,8 @@ for viewId = 1:height(camPoses)
     rotations{viewId} = camPoses.AbsolutePose(viewId).R; % 3x3 rotasyon matrisi
 end
 
-filtered_positions = kalmanFiltering(xyz_smoothed, positions, rotations);
+filtered_positions = kalmanFiltering(xyz_smoothed, positions, rotations, gps_timestamps, image_timestamps); 
+filtered_positions = filtered_positions(1:2:end, :);
 % Sonuçları Görselleştirme
 figure;
 hold on;
@@ -302,22 +310,24 @@ noisyErrorXY = vecnorm(noisy_xyz(:, 1:2) - xyz(:, 1:2), 2, 2); % gps ve ground t
 smoothErrorXY = vecnorm(xyz_smoothed(:, 1:2) - xyz(:, 1:2), 2, 2); % smoothXYgps ve ground truth
 
 % Yüzdelik iyileşmeyi hesapla
+
 improvementPercentage = ((smoothErrorXY - positionErrorXY) ./ smoothErrorXY) * 100; % Yüzde iyileşme
 improvementPercentage(improvementPercentage < 0) = 0; % Negatif değerleri sıfır yap
 % Grafiklerin çizimi
 figure;
 % noisy_GPS pozisyon hatası
 subplot(3, 1, 1);
-plot(noisyErrorXY, '-', 'LineWidth', 2, 'Color', 'r');
+plot(gps_timestamps,noisyErrorXY, '-', 'LineWidth', 2, 'Color', 'r');
 xlabel('Frame');
 ylabel('Error (meters)');
 title('Noisy gps Trajectory XY Error');
+
 grid on;
 legend('Noisy gps Position Error');
-
+xlim([min(gps_timestamps), max(gps_timestamps)]); 
 % smoothed_noisy_gps pozisyon hatası
 subplot(3, 1, 2);
-plot(smoothErrorXY, '-', 'LineWidth', 2, 'Color', 'b');
+plot(gps_timestamps,smoothErrorXY, '-', 'LineWidth', 2, 'Color', 'b');
 xlabel('Frame');
 ylabel('Error (meters)');
 title('Smoothed gps Trajectory XY Error');
@@ -325,17 +335,20 @@ grid on;
 legend('Smoothed gps Position Error');
 
 hold on;
-plot(positionErrorXY, '-', 'LineWidth', 2);
+plot(gps_timestamps,positionErrorXY, '-', 'LineWidth', 2);
 xlabel('Frame');
 ylabel('Error (meters)');
 title('Kalman Filter XY Error (Estimated vs Ground Truth)');
 grid on;
-legend('Smoothed gps Position Error','Filtered Position Error');
+legend('Smoothed gps Position Error','GPS+VO Filtered Position Error');
+xlim([min(gps_timestamps), max(gps_timestamps)]); 
 
 subplot(3, 1, 3);
-plot(improvementPercentage, '-', 'LineWidth', 2);
+plot(gps_timestamps,improvementPercentage, '-', 'LineWidth', 2);
 xlabel('Frame');
 ylabel('Improvement (%)');
 title('Percentage Improvement (Smoothed GPS vs Filtered)');
 grid on;
 legend('Improvement Percentage');
+xlim([min(gps_timestamps), max(gps_timestamps)]);
+

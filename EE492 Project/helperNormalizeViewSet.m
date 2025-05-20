@@ -28,9 +28,9 @@ temp_camPoses = camPoses;
 for i = minViews:maxViews
     % Scale and update translations
     deltaTranslation = camPoses.AbsolutePose(i).Translation - camPoses.AbsolutePose(i-1).Translation;
-    temp_camPoses.AbsolutePose(i).Translation = temp_camPoses.AbsolutePose(i-1).Translation + deltaTranslation * scaleFactor;
+    temp_camPoses.AbsolutePose(i).Translation = temp_camPoses.AbsolutePose(i-1).Translation + deltaTranslation * scaleFactor*0.5;
     
-    % Rotate poses to align with the Z-axis
+    % Rotate poses to align with the Z-axis-
     temp_camPoses.AbsolutePose(i).R = R_inv * camPoses.AbsolutePose(i).R;
 end
 

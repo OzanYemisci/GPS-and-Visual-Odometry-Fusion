@@ -4,7 +4,7 @@ numViews = height(camPoses);
 
 % Define the range of views to consider
 maxViews = numViews;
-minViews = max(2, numViews - 20);
+minViews = max(2, numViews - 10);
 
 % Extract relevant portion of ground truth locations
 locationsGT = xyz(minViews:maxViews, :);

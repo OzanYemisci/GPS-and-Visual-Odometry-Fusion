@@ -2,7 +2,7 @@ clc; clear all;
 addpath('devkit/matlab/');
 oxts = loadOxtsliteData('2011_09_26_drive_0022_sync');
 pose = convertOxtsToPose(oxts);
-rng(0);
+rng(1);
 selectedClasses = ["car", "person", "bicycle", "motorcycle", "bus", "truck"];
 yoloxModel = yoloxObjectDetector("tiny-coco", selectedClasses);
 
@@ -24,6 +24,8 @@ end
 noisy_xyz = addGpsRtkNoise(xyz,3,1);
 xyz_smoothed = kalmanFilterRT(noisy_xyz,gps_timestamps);
 
+
+
 % Kamera parametreleri
 calibration = loadCalibrationCamToCam('calib_cam_to_cam.txt');
 P_matrix = calibration.P_rect{1};
@@ -33,21 +35,6 @@ images = imageDatastore('2011_09_26_drive_0022_sync/image_02/data');
 Irgb = readimage(images, 1); 
 imageSize = size(Irgb,[1,2]);
 intrinsics = cameraIntrinsics(focalLength, principalPoint, imageSize);
-
-%%
-%{
- 2. Global Feature Veritabanı Oluşturma
-% Bag yapısı: her bir öğe sadece feature ve pozisyon içeriyor
-bag = struct('Feature', {}, 'Points', {}, 'Position', {});
-
-for i = 1:numel(images.Files)
-    I = undistortImage(im2gray(readimage(images, i)), intrinsics);
-    points = detectSURFFeatures(I, 'MetricThreshold', 500);
-    [features, ~] = extractFeatures(I, points, 'Upright', true);
-    bag(i).Feature = features;
-    bag(i).Points = points;
-    bag(i).Positions = xyz(i,:);
-%}
 
 %% 4. Ana İşlem Döngüsü
 % İlk görüntüyü işleme
@@ -96,7 +83,7 @@ prevI = I;
 prevFeatures = currFeatures;
 prevPoints   = currPoints;
 
-% Loop through images
+
 for viewId = 3:15
     Irgb = readimage(images, viewId);
     % Read and undistort the current image
@@ -115,6 +102,7 @@ for viewId = 3:15
         intrinsics, indexPairs, currPoints);
     
     warningstate = warning('off','vision:ransac:maxTrialsReached');
+    
     
     % Estimate the world camera pose for the current view.
     absPose = estworldpose(imagePoints, worldPoints, intrinsics);
@@ -211,8 +199,7 @@ for viewId = 16:numel(images.Files)
         vSet = updateView(vSet, camPoses);
         [vSet, temp_camPoses] = helperNormalizeViewSet(vSet, xyz_smoothed);
     
-        % Get bag-matched position
-        %[matched_pos, matched_id] = matchCurrentImageWithBag(bag, Irgb, intrinsics);
+
         matched_pos = xyz_smoothed(viewId, : );
 
         % 1. Mevcut VO pozisyonunu al
@@ -225,12 +212,15 @@ for viewId = 16:numel(images.Files)
         translation_vector = target_pos - current_vo_pos;
 
         soft_translation = translation_vector * 1;
-        start_idx = max(1, height(temp_camPoses)-30); % Son 30 kare (veya daha az varsa)
+        start_idx = max(2, height(temp_camPoses)-30); % Son 30 kare (veya daha az varsa)
+
         for i = start_idx:height(temp_camPoses)
             weight = min(1,(i+1 - start_idx)/30);
             temp_camPoses.AbsolutePose(i).Translation = ...
                 temp_camPoses.AbsolutePose(i).Translation + translation_vector * weight;
         end
+
+    
         % Update view set with the fused pose
         vSet = updateView(vSet, temp_camPoses);
     end
@@ -259,8 +249,8 @@ xlabel('X');
 ylabel('Y');
 zlabel('Z');
 grid on;
-legend('Estimated Camera Trajectory', 'Ground Truth');
-title('Camera Trajectory vs Ground Truth');
+legend('Visual Odometry Trajectory', 'Ground Truth Trajectory');
+title('Camera Trajectory Comparison: VO vs Ground Truth');
 hold off;
 
 
@@ -285,8 +275,8 @@ xlabel('X');
 ylabel('Y');
 zlabel('Z');
 grid on;
-legend('VO Trajectory', 'GPS Trajectory', 'Filtered Trajectory','smoothed_noisyXYZ');
-title('Unscented Kalman Filtered Trajectory (GPS + VO)');
+legend('VO Trajectory', 'Ground Truth', 'UKF(GPS+VO Fusion) Estimated Trajectory','Kalman-Smoothed GPS');
+title('Trajectory Comparison: UKF Estimation (GPS + VO)');
 hold off;
 
 figure;
@@ -297,15 +287,14 @@ xlabel('X');
 ylabel('Y');
 zlabel('Z');
 grid on;
-legend('Noisy GPS Trajectory','smoothedNoisyXYZ');
-title('Noisy GPS vs Smoothed GPS');
+legend('Raw Noisy GPS','Kalman-Smoothed GPS');
+title('GPS Data Comparison: Raw vs Smoothed');
 hold off;
 % XY düzlemindeki filtrelenmiş pozisyon hatası
 positionErrorXY = vecnorm(filtered_positions(:, 1:2) - xyz(:, 1:2), 2, 2); % Filtrelenmiş ve ground truth
 
 % XY düzlemindeki noisy_xyz pozisyon hatası
 noisyErrorXY = vecnorm(noisy_xyz(:, 1:2) - xyz(:, 1:2), 2, 2); % gps ve ground truth
-
 % XY düzlemindeki noisy_xyz pozisyon hatası
 smoothErrorXY = vecnorm(xyz_smoothed(:, 1:2) - xyz(:, 1:2), 2, 2); % smoothXYgps ve ground truth
 
@@ -318,37 +307,56 @@ figure;
 % noisy_GPS pozisyon hatası
 subplot(3, 1, 1);
 plot(gps_timestamps,noisyErrorXY, '-', 'LineWidth', 2, 'Color', 'r');
-xlabel('Frame');
-ylabel('Error (meters)');
-title('Noisy gps Trajectory XY Error');
-
+xlabel('Time (s)');
+ylabel('Position Error (m)');
+title('Position Error: Raw Noisy GPS vs Ground Truth');
 grid on;
-legend('Noisy gps Position Error');
 xlim([min(gps_timestamps), max(gps_timestamps)]); 
+
 % smoothed_noisy_gps pozisyon hatası
 subplot(3, 1, 2);
 plot(gps_timestamps,smoothErrorXY, '-', 'LineWidth', 2, 'Color', 'b');
-xlabel('Frame');
-ylabel('Error (meters)');
-title('Smoothed gps Trajectory XY Error');
-grid on;
-legend('Smoothed gps Position Error');
-
 hold on;
 plot(gps_timestamps,positionErrorXY, '-', 'LineWidth', 2);
-xlabel('Frame');
-ylabel('Error (meters)');
-title('Kalman Filter XY Error (Estimated vs Ground Truth)');
+xlabel('Time (s)');
+ylabel('Position Error (m)');
+title('Position Error Comparison: Kalman-Smoothed GPS vs UKF(GPS+VO Fusion) Estimation');
 grid on;
-legend('Smoothed gps Position Error','GPS+VO Filtered Position Error');
+legend('Kalman-Smoothed GPS Error','UKF(GPS+VO Fusion) Estimated Error');
 xlim([min(gps_timestamps), max(gps_timestamps)]); 
 
 subplot(3, 1, 3);
-plot(gps_timestamps,improvementPercentage, '-', 'LineWidth', 2);
-xlabel('Frame');
+plot(gps_timestamps,improvementPercentage, '-', 'LineWidth', 2, 'Color', 'k');
+xlabel('Time (s)');
 ylabel('Improvement (%)');
-title('Percentage Improvement (Smoothed GPS vs Filtered)');
+title('Error Reduction: UKF(GPS+VO Fusion) vs Kalman-Smoothed GPS');
 grid on;
-legend('Improvement Percentage');
-xlim([min(gps_timestamps), max(gps_timestamps)]);
+xlim([min(gps_timestamps), max(gps_timestamps)]); 
 
+% positionErrorXY için istatistiksel değerler
+meanPositionError = mean(positionErrorXY);
+maxPositionError = max(positionErrorXY);
+minPositionError = min(positionErrorXY);
+fprintf('Position Error (UKF): Mean = %.2f m, Max = %.2f m, Min = %.2f m\n', ...
+    meanPositionError, maxPositionError, minPositionError);
+
+% noisyErrorXY için istatistiksel değerler
+meanNoisyError = mean(noisyErrorXY);
+maxNoisyError = max(noisyErrorXY);
+minNoisyError = min(noisyErrorXY);
+fprintf('Noisy GPS Error: Mean = %.2f m, Max = %.2f m, Min = %.2f m\n', ...
+    meanNoisyError, maxNoisyError, minNoisyError);
+
+% smoothErrorXY için istatistiksel değerler
+meanSmoothError = mean(smoothErrorXY);
+maxSmoothError = max(smoothErrorXY);
+minSmoothError = min(smoothErrorXY);
+fprintf('Kalman-Smoothed GPS Error: Mean = %.2f m, Max = %.2f m, Min = %.2f m\n', ...
+    meanSmoothError, maxSmoothError, minSmoothError);
+
+% improvementPercentage için istatistiksel değerler
+meanImprovement = mean(improvementPercentage);
+maxImprovement = max(improvementPercentage);
+minImprovement = min(improvementPercentage);
+fprintf('Improvement Percentage: Mean = %.2f%%, Max = %.2f%%, Min = %.2f%%\n', ...
+    meanImprovement, maxImprovement, minImprovement);
